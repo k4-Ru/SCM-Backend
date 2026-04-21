@@ -56,6 +56,13 @@ function requireInternalUser($authPayload) {
   }
 }
 
+function requireInternalEditor($authPayload) {
+  $role = $authPayload['role'] ?? '';
+  if ($role === 'supplier' || $role === 'viewer') {
+    respond(['error' => 'Forbidden for this role'], 403);
+  }
+}
+
 function requireSupplierUser($authPayload) {
   if (($authPayload['role'] ?? '') !== 'supplier') {
     respond(['error' => 'Forbidden. Supplier access required'], 403);
@@ -256,6 +263,22 @@ try {
       }
       break;
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     case 'suppliers':
       // GET /api/suppliers and GET /api/suppliers/{id}
       if ($method === 'GET') {
@@ -319,6 +342,20 @@ try {
       }
       break;
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     case 'procurements':
       $role = $authPayload['role'] ?? '';
       if ($role === 'viewer') {
@@ -367,6 +404,17 @@ try {
         respond($scm->deleteProcurement($id), 200);
       }
       break;
+
+
+
+
+
+
+
+
+
+
+
 
     case 'shipments':
       $role = $authPayload['role'] ?? '';
@@ -424,8 +472,226 @@ try {
         respond($scm->deleteShipment($id), 200);
       }
       break;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    case 'products':
+      // GET /api/products and GET /api/products/{id}
+      if ($method === 'GET') {
+        if (!empty($id)) {
+          $row = $scm->getProduct($id);
+          if (!$row) {
+            respond(['error' => 'Product not found'], 404);
+          }
+          respond($row, 200);
+        }
+        respond($scm->listProducts(), 200);
+      }
+
+      // POST /api/products
+      if ($method === 'POST') {
+        requireInternalEditor($authPayload);
+        respond($scm->createProduct($dt), 201);
+      }
+
+      // PATCH /api/products/{id}
+      if ($method === 'PATCH' && !empty($id)) {
+        requireInternalEditor($authPayload);
+        $row = $scm->updateProduct($id, $dt);
+        if (!$row) {
+          respond(['error' => 'Product not found'], 404);
+        }
+        respond($row, 200);
+      }
+
+      // DELETE /api/products/{id}
+      if ($method === 'DELETE' && !empty($id)) {
+        requireAdmin($authPayload);
+        respond($scm->deleteProduct($id), 200);
+      }
+      break;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    case 'inventory':
+      // GET /api/inventory and GET /api/inventory/{id}
+      if ($method === 'GET') {
+        requireInternalEditor($authPayload);
+        if (!empty($id)) {
+          $row = $scm->getInventory($id);
+          if (!$row) {
+            respond(['error' => 'Inventory row not found'], 404);
+          }
+          respond($row, 200);
+        }
+        respond($scm->listInventory(), 200);
+      }
+
+      // POST /api/inventory (upsert by product_id)
+      if ($method === 'POST') {
+        requireInternalEditor($authPayload);
+        respond($scm->upsertInventory($dt), 201);
+      }
+
+      // PATCH /api/inventory/{id}
+      if ($method === 'PATCH' && !empty($id)) {
+        requireInternalEditor($authPayload);
+        $row = $scm->updateInventory($id, $dt);
+        if (!$row) {
+          respond(['error' => 'Inventory row not found'], 404);
+        }
+        respond($row, 200);
+      }
+      break;
+
+    case 'notifications':
+      // GET /api/notifications
+      if ($method === 'GET') {
+        $role = $authPayload['role'] ?? '';
+        $userId = (int) ($authPayload['sub'] ?? 0);
+        if ($role === 'admin' || $role === 'superadmin') {
+          respond($scm->listNotifications(), 200);
+        }
+        respond($scm->listNotifications($userId), 200);
+      }
+
+      // POST /api/notifications
+      if ($method === 'POST') {
+        requireInternalEditor($authPayload);
+        respond($scm->createNotification($dt), 201);
+      }
+
+      // PATCH /api/notifications/{id}
+      if ($method === 'PATCH' && !empty($id)) {
+        $role = $authPayload['role'] ?? '';
+        $userId = (int) ($authPayload['sub'] ?? 0);
+        if ($role !== 'admin' && $role !== 'superadmin') {
+          $notification = $scm->getNotification($id);
+          if (!$notification || (int) $notification['user_id'] !== $userId) {
+            respond(['error' => 'Forbidden. You can only update your own notifications'], 403);
+          }
+        }
+        $row = $scm->markNotificationRead($id, $dt->is_read ?? 1);
+        if (!$row) {
+          respond(['error' => 'Notification not found'], 404);
+        }
+        respond($row, 200);
+      }
+      break;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    case 'supplier-applications':
+      // GET /api/supplier-applications and GET /api/supplier-applications/{id}
+      if ($method === 'GET') {
+        requireInternalEditor($authPayload);
+        if (!empty($id)) {
+          $row = $scm->getSupplierApplication($id);
+          if (!$row) {
+            respond(['error' => 'Supplier application not found'], 404);
+          }
+          respond($row, 200);
+        }
+        $status = $_GET['status'] ?? null;
+        respond($scm->listSupplierApplications($status), 200);
+      }
+
+      // POST /api/supplier-applications
+      if ($method === 'POST') {
+        requireInternalEditor($authPayload);
+        respond($scm->createSupplierApplication($dt), 201);
+      }
+
+      // PATCH /api/supplier-applications/{id}
+      if ($method === 'PATCH' && !empty($id)) {
+        requireAdmin($authPayload);
+        $reviewedBy = (int) ($authPayload['sub'] ?? 0);
+        $row = $scm->reviewSupplierApplication($id, $dt, $reviewedBy);
+        if (!$row) {
+          respond(['error' => 'Supplier application not found'], 404);
+        }
+        respond($row, 200);
+      }
+      break;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    case 'activity-logs':
+      // GET /api/activity-logs
+      if ($method === 'GET') {
+        requireAdmin($authPayload);
+        $userId = isset($_GET['user_id']) ? (int) $_GET['user_id'] : null;
+        respond($scm->listActivityLogs($userId), 200);
+      }
+
+      // POST /api/activity-logs
+      if ($method === 'POST') {
+        requireInternalEditor($authPayload);
+        respond($scm->createActivityLog($dt), 201);
+      }
+      break;
   }
 
+
+
+
+
+
+
+  
   respond(['error' => 'Endpoint not found'], 404);
 } catch (InvalidArgumentException $e) {
   respond(['error' => $e->getMessage()], 400);

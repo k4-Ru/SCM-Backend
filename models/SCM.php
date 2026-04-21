@@ -97,7 +97,7 @@ class SCM {
     }
 
     $role = $dt->role ?? 'viewer';
-    $this->statusAllowed($role, ['admin', 'procurement', 'warehouse', 'logistics', 'viewer', 'supplier'], 'role');
+    $this->statusAllowed($role, ['superadmin', 'admin', 'procurement', 'warehouse', 'viewer', 'supplier'], 'role');
     $isActive = isset($dt->is_active) ? (int) ((bool) $dt->is_active) : 1;
     $supplierId = isset($dt->supplier_id) ? (int) $dt->supplier_id : null;
 
@@ -133,7 +133,7 @@ class SCM {
     $role = $dt->role ?? $current['role'];
     $isActive = isset($dt->is_active) ? (int) ((bool) $dt->is_active) : (int) $current['is_active'];
 
-    $this->statusAllowed($role, ['admin', 'procurement', 'warehouse', 'logistics', 'viewer', 'supplier'], 'role');
+    $this->statusAllowed($role, ['superadmin', 'admin', 'procurement', 'warehouse', 'viewer', 'supplier'], 'role');
     $supplierId = isset($dt->supplier_id) ? (int) $dt->supplier_id : ($current['supplier_id'] ?? null);
 
     if ($role === 'supplier' && empty($supplierId)) {
@@ -214,7 +214,7 @@ class SCM {
     }
 
     $status = $dt->status ?? 'active';
-    $this->statusAllowed($status, ['active', 'inactive'], 'supplier status');
+    $this->statusAllowed($status, ['pending', 'active', 'inactive'], 'supplier status');
 
     $stmt = $this->pdo->prepare(
       "INSERT INTO suppliers (name, contact_person, email, phone, address, status)
@@ -240,7 +240,7 @@ class SCM {
     }
 
     $status = $dt->status ?? $current['status'];
-    $this->statusAllowed($status, ['active', 'inactive'], 'supplier status');
+    $this->statusAllowed($status, ['pending', 'active', 'inactive'], 'supplier status');
 
     $stmt = $this->pdo->prepare(
       "UPDATE suppliers
@@ -269,8 +269,8 @@ class SCM {
 
   public function listProcurements($status = null, $supplierId = null) {
     $sql = "SELECT p.id, p.supplier_id, s.name AS supplier_name, p.created_by,
-                   u.name AS created_by_name, p.order_date, p.expected_delivery,
-                   p.status, p.total_amount, p.created_at
+             u.name AS created_by_name, p.order_date, p.expected_delivery,
+             p.status, p.received_by, p.total_amount, p.created_at
             FROM procurements p
             INNER JOIN suppliers s ON s.id = p.supplier_id
             INNER JOIN users u ON u.id = p.created_by";
@@ -302,9 +302,9 @@ class SCM {
     }
 
     $stmt = $this->pdo->prepare(
-      "SELECT p.id, p.supplier_id, s.name AS supplier_name, p.created_by,
+            "SELECT p.id, p.supplier_id, s.name AS supplier_name, p.created_by,
               u.name AS created_by_name, p.order_date, p.expected_delivery,
-              p.status, p.total_amount, p.created_at
+              p.status, p.received_by, p.total_amount, p.created_at
        FROM procurements p
        INNER JOIN suppliers s ON s.id = p.supplier_id
        INNER JOIN users u ON u.id = p.created_by
@@ -318,7 +318,7 @@ class SCM {
     }
 
     $items = $this->pdo->prepare(
-      "SELECT id, procurement_id, product_name, quantity, unit_price, subtotal
+      "SELECT id, procurement_id, product_id, product_name, quantity, unit_price, subtotal
        FROM procurement_items
        WHERE procurement_id = ?
        ORDER BY id ASC"
@@ -367,8 +367,8 @@ class SCM {
 
       $procurementId = (int) $this->pdo->lastInsertId();
       $insertItem = $this->pdo->prepare(
-        "INSERT INTO procurement_items (procurement_id, product_name, quantity, unit_price, subtotal)
-         VALUES (?, ?, ?, ?, ?)"
+        "INSERT INTO procurement_items (procurement_id, product_id, product_name, quantity, unit_price, subtotal)
+         VALUES (?, ?, ?, ?, ?, ?)"
       );
 
       $total = 0.00;
@@ -388,6 +388,7 @@ class SCM {
 
         $insertItem->execute([
           $procurementId,
+          isset($item->product_id) ? (int) $item->product_id : null,
           trim($item->product_name),
           $quantity,
           $unitPrice,
@@ -413,8 +414,19 @@ class SCM {
 
     $this->statusAllowed($dt->status, ['pending', 'approved', 'shipped', 'delivered', 'cancelled'], 'procurement status');
 
-    $stmt = $this->pdo->prepare("UPDATE procurements SET status = ? WHERE id = ?");
-    $stmt->execute([$dt->status, (int) $id]);
+    $current = $this->getProcurement($id);
+    if (!$current) {
+      return null;
+    }
+
+    $receivedBy = isset($dt->received_by) ? (int) $dt->received_by : ($current['received_by'] ?? null);
+
+    $stmt = $this->pdo->prepare(
+      "UPDATE procurements
+       SET status = ?, received_by = ?
+       WHERE id = ?"
+    );
+    $stmt->execute([$dt->status, $receivedBy, (int) $id]);
 
     if ($stmt->rowCount() < 1) {
       return null;
@@ -631,5 +643,351 @@ class SCM {
        ORDER BY total_amount DESC, total_orders DESC"
     );
     return $stmt->fetchAll();
+  }
+
+  public function listProducts() {
+    $stmt = $this->pdo->query(
+      "SELECT id, name, unit, stock_quantity, reorder_level, created_at
+       FROM products
+       ORDER BY id DESC"
+    );
+    return $stmt->fetchAll();
+  }
+
+
+
+
+
+
+  public function getProduct($id) {
+    $stmt = $this->pdo->prepare(
+      "SELECT id, name, unit, stock_quantity, reorder_level, created_at
+       FROM products
+       WHERE id = ?"
+    );
+    $stmt->execute([(int) $id]);
+    return $stmt->fetch();
+  }
+
+
+
+
+
+
+
+
+  public function createProduct($dt) {
+    if (empty($dt->name)) {
+      throw new InvalidArgumentException('name is required');
+    }
+
+    $stockQuantity = isset($dt->stock_quantity) ? (int) $dt->stock_quantity : 0;
+    $reorderLevel = isset($dt->reorder_level) ? (int) $dt->reorder_level : 0;
+
+    $stmt = $this->pdo->prepare(
+      'INSERT INTO products (name, unit, stock_quantity, reorder_level)
+       VALUES (?, ?, ?, ?)'
+    );
+    $stmt->execute([
+      trim($dt->name),
+      $dt->unit ?? null,
+      $stockQuantity,
+      $reorderLevel
+    ]);
+
+    return $this->getProduct($this->pdo->lastInsertId());
+  }
+
+  public function updateProduct($id, $dt) {
+    $current = $this->getProduct($id);
+    if (!$current) {
+      return null;
+    }
+
+    $stmt = $this->pdo->prepare(
+      'UPDATE products
+       SET name = ?, unit = ?, stock_quantity = ?, reorder_level = ?
+       WHERE id = ?'
+    );
+    $stmt->execute([
+      trim($dt->name ?? $current['name']),
+      $dt->unit ?? $current['unit'],
+      isset($dt->stock_quantity) ? (int) $dt->stock_quantity : (int) $current['stock_quantity'],
+      isset($dt->reorder_level) ? (int) $dt->reorder_level : (int) $current['reorder_level'],
+      (int) $id
+    ]);
+
+    return $this->getProduct($id);
+  }
+
+  public function deleteProduct($id) {
+    $stmt = $this->pdo->prepare('DELETE FROM products WHERE id = ?');
+    $stmt->execute([(int) $id]);
+    return ['deleted' => $stmt->rowCount() > 0];
+  }
+
+  public function listInventory() {
+    $stmt = $this->pdo->query(
+      "SELECT i.id, i.product_id, p.name AS product_name, i.stock_quantity, i.location, i.last_updated
+       FROM inventory i
+       INNER JOIN products p ON p.id = i.product_id
+       ORDER BY i.id DESC"
+    );
+    return $stmt->fetchAll();
+  }
+
+  public function getInventory($id) {
+    $stmt = $this->pdo->prepare(
+      "SELECT i.id, i.product_id, p.name AS product_name, i.stock_quantity, i.location, i.last_updated
+       FROM inventory i
+       INNER JOIN products p ON p.id = i.product_id
+       WHERE i.id = ?"
+    );
+    $stmt->execute([(int) $id]);
+    return $stmt->fetch();
+  }
+
+  public function upsertInventory($dt) {
+    if (empty($dt->product_id)) {
+      throw new InvalidArgumentException('product_id is required'); //
+    }
+
+    $stockQuantity = isset($dt->stock_quantity) ? (int) $dt->stock_quantity : 0;
+    $location = $dt->location ?? null;
+
+    $stmt = $this->pdo->prepare(
+      'INSERT INTO inventory (product_id, stock_quantity, location)
+       VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE stock_quantity = VALUES(stock_quantity), location = VALUES(location)'
+    );
+    $stmt->execute([
+      (int) $dt->product_id,
+      $stockQuantity,
+      $location
+    ]);
+
+    $row = $this->pdo->prepare('SELECT id FROM inventory WHERE product_id = ? LIMIT 1');
+    $row->execute([(int) $dt->product_id]);
+    $inventory = $row->fetch();
+
+    return $inventory ? $this->getInventory((int) $inventory['id']) : null;
+  }
+
+  public function updateInventory($id, $dt) {
+    $current = $this->getInventory($id);
+    if (!$current) {
+      return null;
+    }
+
+    $stmt = $this->pdo->prepare(
+      'UPDATE inventory
+       SET stock_quantity = ?, location = ?
+       WHERE id = ?'
+    );
+    $stmt->execute([
+      isset($dt->stock_quantity) ? (int) $dt->stock_quantity : (int) $current['stock_quantity'],
+      $dt->location ?? $current['location'],
+      (int) $id
+    ]);
+
+    return $this->getInventory($id);
+  }
+
+  public function listNotifications($userId = null) {
+    $params = [];
+    $sql = 'SELECT id, user_id, title, message, is_read, created_at FROM notifications';
+
+    if (!empty($userId)) {
+      $sql .= ' WHERE user_id = ?';
+      $params[] = (int) $userId;
+    }
+
+    $sql .= ' ORDER BY id DESC';
+    $stmt = $this->pdo->prepare($sql);
+    $stmt->execute($params);
+    return $stmt->fetchAll();
+  }
+
+  public function getNotification($id) {
+    $stmt = $this->pdo->prepare(
+      'SELECT id, user_id, title, message, is_read, created_at
+       FROM notifications
+       WHERE id = ?'
+    );
+    $stmt->execute([(int) $id]);
+    return $stmt->fetch();
+  }
+
+  public function markNotificationRead($id, $isRead = 1) {
+    $stmt = $this->pdo->prepare('UPDATE notifications SET is_read = ? WHERE id = ?');
+    $stmt->execute([(int) ((bool) $isRead), (int) $id]);
+
+    if ($stmt->rowCount() < 1) {
+      return null;
+    }
+
+    $row = $this->pdo->prepare('SELECT id, user_id, title, message, is_read, created_at FROM notifications WHERE id = ?');
+    $row->execute([(int) $id]);
+    return $row->fetch();
+  }
+
+
+
+
+
+
+
+
+  public function createNotification($dt) {
+    if (empty($dt->user_id) || empty($dt->title) || empty($dt->message)) {
+      throw new InvalidArgumentException('user_id, title and message are required');
+    }
+
+    $stmt = $this->pdo->prepare(
+      'INSERT INTO notifications (user_id, title, message, is_read)
+       VALUES (?, ?, ?, 0)'
+    );
+    $stmt->execute([
+      (int) $dt->user_id,
+      trim($dt->title),
+      trim($dt->message)
+    ]);
+
+    $id = (int) $this->pdo->lastInsertId();
+    $row = $this->pdo->prepare('SELECT id, user_id, title, message, is_read, created_at FROM notifications WHERE id = ?');
+    $row->execute([$id]);
+    return $row->fetch();
+  }
+
+
+
+
+
+  public function listSupplierApplications($status = null) {
+    $params = [];
+    $sql = 'SELECT id, company_name, contact_person, email, phone, address, status, reviewed_by, reviewed_at, notes, created_at FROM supplier_applications';
+
+    if (!empty($status)) {
+      $sql .= ' WHERE status = ?';
+      $params[] = $status;
+    }
+
+    $sql .= ' ORDER BY id DESC';
+    $stmt = $this->pdo->prepare($sql);
+    $stmt->execute($params);
+    return $stmt->fetchAll();
+  }
+
+
+
+
+
+
+  public function getSupplierApplication($id) {
+    $stmt = $this->pdo->prepare(
+      'SELECT id, company_name, contact_person, email, phone, address, status, reviewed_by, reviewed_at, notes, created_at
+       FROM supplier_applications
+       WHERE id = ?'
+    );
+    $stmt->execute([(int) $id]);
+    return $stmt->fetch();
+  }
+
+
+
+
+
+
+
+  public function createSupplierApplication($dt) {
+    if (empty($dt->company_name) || empty($dt->contact_person) || empty($dt->email)) {
+      throw new InvalidArgumentException('company_name, contact_person and email are required');
+    }
+
+    $stmt = $this->pdo->prepare(
+      'INSERT INTO supplier_applications (company_name, contact_person, email, phone, address, status, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?)'
+    );
+    $stmt->execute([
+      trim($dt->company_name),
+      trim($dt->contact_person),
+      strtolower(trim($dt->email)),
+      $dt->phone ?? null,
+      $dt->address ?? null,
+      'pending',
+      $dt->notes ?? null
+    ]);
+
+    return $this->getSupplierApplication($this->pdo->lastInsertId());
+  }
+
+
+
+
+
+
+
+  
+  public function reviewSupplierApplication($id, $dt, $reviewedBy) {
+    if (empty($dt->status)) {
+      throw new InvalidArgumentException('status is required');
+    }
+
+    $this->statusAllowed($dt->status, ['approved', 'rejected'], 'supplier application status');
+    $current = $this->getSupplierApplication($id);
+    if (!$current) {
+      return null;
+    }
+
+    $stmt = $this->pdo->prepare(
+      'UPDATE supplier_applications
+       SET status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP, notes = ?
+       WHERE id = ?'
+    );
+    $stmt->execute([
+      $dt->status,
+      (int) $reviewedBy,
+      $dt->notes ?? $current['notes'],
+      (int) $id
+    ]);
+
+    return $this->getSupplierApplication($id);
+  }
+
+  public function listActivityLogs($userId = null) {
+    $params = [];
+    $sql = 'SELECT id, user_id, action, target_table, target_id, description, created_at FROM activity_logs';
+    if (!empty($userId)) {
+      $sql .= ' WHERE user_id = ?';
+      $params[] = (int) $userId;
+    }
+    $sql .= ' ORDER BY id DESC';
+
+    $stmt = $this->pdo->prepare($sql);
+    $stmt->execute($params);
+    return $stmt->fetchAll();
+  }
+
+  public function createActivityLog($dt) {
+    if (empty($dt->user_id) || empty($dt->action)) {
+      throw new InvalidArgumentException('user_id and action are required');
+    }
+
+    $stmt = $this->pdo->prepare(
+      'INSERT INTO activity_logs (user_id, action, target_table, target_id, description)
+       VALUES (?, ?, ?, ?, ?)'
+    );
+    $stmt->execute([
+      (int) $dt->user_id,
+      trim($dt->action),
+      $dt->target_table ?? null,
+      isset($dt->target_id) ? (int) $dt->target_id : null,
+      $dt->description ?? null
+    ]);
+
+    $id = (int) $this->pdo->lastInsertId();
+    $row = $this->pdo->prepare('SELECT id, user_id, action, target_table, target_id, description, created_at FROM activity_logs WHERE id = ?');
+    $row->execute([$id]);
+    return $row->fetch();
   }
 }
