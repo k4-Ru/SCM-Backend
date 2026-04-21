@@ -168,7 +168,7 @@ class Auth {
 
   public function logout($dt = null) {
     return [
-      'message' => 'Logged out on client. Remove the token from frontend storage.'
+      'message' => 'Logged out on client.'
     ];
   }
 }

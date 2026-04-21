@@ -1,5 +1,4 @@
 <?php
-require_once __DIR__ . "/functions.php";
 require __DIR__ . "/vendor/autoload.php";
 
 $env = Dotenv\Dotenv::createImmutable(__DIR__ . "/config/");
@@ -29,11 +28,21 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
 
 header('Content-Type: application/json');
 
+
+
+
+
+
+
+//for response
 function respond($data, $status = 200) {
   http_response_code($status);
   echo json_encode($data);
   exit;
 }
+
+
+
 
 function getBearerToken() {
   $header = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
@@ -43,7 +52,14 @@ function getBearerToken() {
   return null;
 }
 
-function requireAdmin($authPayload) {
+
+
+
+
+
+
+
+function requireAdmin($authPayload) { //for admin access since rbac tayo
   $role = $authPayload['role'] ?? '';
   if ($role !== 'superadmin' && $role !== 'admin') {
     respond(['error' => 'Forbidden. Admin access required'], 403);
@@ -73,7 +89,7 @@ function getSupplierIdFromToken($authPayload) {
   return isset($authPayload['supplier_id']) ? (int) $authPayload['supplier_id'] : 0;
 }
 
-function resolveRouteParams() {
+function resolveRouteParams() { //parse 
   $rawParams = $_GET['params'] ?? '';
   if (trim((string) $rawParams) !== '') {
     return $rawParams;
@@ -82,7 +98,7 @@ function resolveRouteParams() {
   $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?? '/';
   $path = trim($path, '/');
 
-  // Supports /main.php/api/... and /api/... styles.
+  // Support /main.php/api/... and /api/... styles.
   if (stripos($path, 'main.php/') === 0) {
     $path = substr($path, strlen('main.php/'));
   } elseif ($path === 'main.php') {
@@ -91,6 +107,10 @@ function resolveRouteParams() {
 
   return $path;
 }
+
+
+
+
 
 try {
   $db = new Connection();
