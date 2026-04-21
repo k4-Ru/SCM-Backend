@@ -89,7 +89,9 @@ function getSupplierIdFromToken($authPayload) {
   return isset($authPayload['supplier_id']) ? (int) $authPayload['supplier_id'] : 0;
 }
 
-function resolveRouteParams() { //parse 
+
+
+function resolveRouteParams() { 
   $rawParams = $_GET['params'] ?? '';
   if (trim((string) $rawParams) !== '') {
     return $rawParams;
@@ -98,7 +100,7 @@ function resolveRouteParams() { //parse
   $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?? '/';
   $path = trim($path, '/');
 
-  // Support /main.php/api/... and /api/... styles.
+
   if (stripos($path, 'main.php/') === 0) {
     $path = substr($path, strlen('main.php/'));
   } elseif ($path === 'main.php') {
@@ -159,19 +161,20 @@ try {
 
 
 
-  // // POST /api/login (legacy)
+  //old 
+  // // POST /api/login 
   // if ($method === 'POST' && $resource === 'login') {
   //   respond($auth->login($dt), 200);
   // }
 
-  // // POST /api/refresh (legacy)
+  // // POST /api/refresh
   // if ($method === 'POST' && $resource === 'refresh') {
   //   respond([
-  //     'error' => 'Refresh is disabled in stateless JWT mode. Please login again.'
+  //     'error' => ' Please login again.'
   //   ], 410);
   // }
 
-  // // POST /api/logout (legacy)
+  // // POST /api/logout
   // if ($method === 'POST' && $resource === 'logout') {
   //   respond($auth->logout($dt), 200);
   // }

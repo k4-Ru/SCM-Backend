@@ -1,6 +1,8 @@
 <?php
 
 class UserModel extends BaseModel {
+
+
   public function listUsers($page = 1, $limit = 20) {
     list($limit, $offset) = $this->paginate($page, $limit);
 
@@ -72,6 +74,10 @@ class UserModel extends BaseModel {
     return $this->getUser((int) $userId);
   }
 
+
+
+
+  
   public function createUser($dt) {
     if (empty($dt->name) || empty($dt->email) || empty($dt->password)) {
       throw new InvalidArgumentException("name, email and password are required");

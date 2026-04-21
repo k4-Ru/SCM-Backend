@@ -44,6 +44,10 @@ class Auth {
     return JWT::encode($payload, $this->getJwtSecret(), 'HS256');
   }
 
+
+
+
+  
   public function verifyAccessToken($token) {
     if (empty($token)) {
       throw new InvalidArgumentException('Missing access token');

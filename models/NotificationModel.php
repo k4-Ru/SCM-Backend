@@ -26,6 +26,7 @@ class NotificationModel extends BaseModel {
     return $stmt->fetch();
   }
 
+
   public function markNotificationRead($id, $isRead = 1) {
     $stmt = $this->pdo->prepare('UPDATE notifications SET is_read = ? WHERE id = ?');
     $stmt->execute([(int) ((bool) $isRead), (int) $id]);
@@ -48,6 +49,7 @@ class NotificationModel extends BaseModel {
       'INSERT INTO notifications (user_id, title, message, is_read)
        VALUES (?, ?, ?, 0)'
     );
+    
     $stmt->execute([
       (int) $dt->user_id,
       trim($dt->title),

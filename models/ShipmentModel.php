@@ -45,6 +45,8 @@ class ShipmentModel extends BaseModel {
     return $stmt->fetch();
   }
 
+
+  
   public function updateShipmentStatusForSupplier($id, $supplierId, $dt) {
     if (empty($dt->status)) {
       throw new InvalidArgumentException('status is required');
@@ -115,7 +117,7 @@ class ShipmentModel extends BaseModel {
 
 
 
-  
+
   public function updateShipment($id, $dt) {
     $current = $this->getShipment($id);
     if (!$current) {
@@ -132,6 +134,9 @@ class ShipmentModel extends BaseModel {
        WHERE id = ?"
     );
 
+
+
+
     $stmt->execute([
       trim($dt->tracking_number ?? $current['tracking_number']),
       trim($dt->carrier ?? $current['carrier']),
@@ -147,6 +152,9 @@ class ShipmentModel extends BaseModel {
 
     return $this->getShipment($id);
   }
+
+
+
 
   public function deleteShipment($id) {
     $stmt = $this->pdo->prepare("DELETE FROM shipments WHERE id = ?");
