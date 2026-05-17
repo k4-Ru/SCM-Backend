@@ -6,9 +6,32 @@ use Firebase\JWT\SignatureInvalidException;
 
 class Auth {
   private $pdo = '';
+  private $columnSupport = [];
 
   public function __construct(\PDO $pdo) {
     $this->pdo = $pdo;
+  }
+
+  private function hasUsersColumn($columnName) {
+    if (array_key_exists($columnName, $this->columnSupport)) {
+      return $this->columnSupport[$columnName];
+    }
+
+    $stmt = $this->pdo->prepare(
+      "SELECT 1
+       FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'users'
+         AND COLUMN_NAME = ?
+       LIMIT 1"
+    );
+    $stmt->execute([$columnName]);
+    $this->columnSupport[$columnName] = (bool) $stmt->fetchColumn();
+    return $this->columnSupport[$columnName];
+  }
+
+  private function encryptedEmailSupported() {
+    return $this->hasUsersColumn('email_enc') && $this->hasUsersColumn('email_iv') && $this->hasUsersColumn('email_tag');
   }
 
 
@@ -89,6 +112,23 @@ class Auth {
     ]);
     $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
+    if (!$user) {
+      $appLookup = $this->pdo->prepare(
+        'SELECT status FROM supplier_applications WHERE email = ? ORDER BY id DESC LIMIT 1'
+      );
+      $appLookup->execute([strtolower(trim($dt->email ?? ''))]);
+      $application = $appLookup->fetch(PDO::FETCH_ASSOC);
+      if ($application) {
+        $status = $application['status'] ?? '';
+        if ($status === 'pending') {
+          throw new RuntimeException('Application pending approval');
+        }
+        if ($status === 'rejected') {
+          throw new RuntimeException('Application rejected');
+        }
+      }
+    }
+
     if (!$user || (int) $user['is_active'] !== 1 || !password_verify($dt->password, $user['password_hash'])) {
       throw new RuntimeException('Invalid credentials');
     }
@@ -142,17 +182,35 @@ class Auth {
       $supplierId = (int) $dt->supplier_id;
     }
 
-    $stmt = $this->pdo->prepare(
-      'INSERT INTO users (name, email, password_hash, role, supplier_id, is_active)
-       VALUES (?, ?, ?, ?, ?, 1)'
-    );
-    $stmt->execute([
-      trim($dt->name),
-      $email,
-      password_hash($dt->password, PASSWORD_DEFAULT),
-      $role,
-      $supplierId
-    ]);
+    if ($this->encryptedEmailSupported()) {
+      $emailEncrypted = Crypto::encryptString($email);
+      $stmt = $this->pdo->prepare(
+        'INSERT INTO users (name, email, password_hash, role, supplier_id, is_active, email_enc, email_iv, email_tag)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)'
+      );
+      $stmt->execute([
+        trim($dt->name),
+        $email,
+        password_hash($dt->password, PASSWORD_DEFAULT),
+        $role,
+        $supplierId,
+        $emailEncrypted['ciphertext'],
+        $emailEncrypted['iv'],
+        $emailEncrypted['tag']
+      ]);
+    } else {
+      $stmt = $this->pdo->prepare(
+        'INSERT INTO users (name, email, password_hash, role, supplier_id, is_active)
+         VALUES (?, ?, ?, ?, ?, 1)'
+      );
+      $stmt->execute([
+        trim($dt->name),
+        $email,
+        password_hash($dt->password, PASSWORD_DEFAULT),
+        $role,
+        $supplierId
+      ]);
+    }
 
     $id = (int) $this->pdo->lastInsertId();
     $row = $this->pdo->prepare(

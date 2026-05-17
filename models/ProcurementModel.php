@@ -1,13 +1,72 @@
 <?php
 
 class ProcurementModel extends BaseModel {
+  private $tableSupport = [];
+
+  private function hasTable($tableName) {
+    if (array_key_exists($tableName, $this->tableSupport)) {
+      return $this->tableSupport[$tableName];
+    }
+    $stmt = $this->pdo->prepare(
+      "SELECT 1
+       FROM information_schema.TABLES
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = ?
+       LIMIT 1"
+    );
+    $stmt->execute([$tableName]);
+    $this->tableSupport[$tableName] = (bool) $stmt->fetchColumn();
+    return $this->tableSupport[$tableName];
+  }
+
+  private function assertProcurementAccess($procurementId, $supplierId = null) {
+    $params = [(int) $procurementId];
+    $sql = "SELECT id, supplier_id FROM procurements WHERE id = ?";
+    if (!empty($supplierId)) {
+      $sql .= " AND supplier_id = ?";
+      $params[] = (int) $supplierId;
+    }
+
+    $stmt = $this->pdo->prepare($sql);
+    $stmt->execute($params);
+    return $stmt->fetch();
+  }
+
+  private function recalculateProcurementTotal($procurementId) {
+    $sumStmt = $this->pdo->prepare(
+      "SELECT COALESCE(SUM(subtotal), 0) AS total
+       FROM procurement_items
+       WHERE procurement_id = ?"
+    );
+    $sumStmt->execute([(int) $procurementId]);
+    $total = (float) ($sumStmt->fetch()['total'] ?? 0);
+
+    $update = $this->pdo->prepare("UPDATE procurements SET total_amount = ? WHERE id = ?");
+    $update->execute([round($total, 2), (int) $procurementId]);
+  }
+
   public function listProcurements($status = null, $supplierId = null) {
     $sql = "SELECT p.id, p.supplier_id, s.name AS supplier_name, p.created_by,
              u.name AS created_by_name, p.order_date, p.expected_delivery,
-             p.status, p.received_by, p.total_amount, p.created_at
+             p.status, p.received_by, rw.name AS received_by_name, p.total_amount, p.created_at,
+             COALESCE(pi.items_count, 0) AS items_count,
+             COALESCE(pi.items_preview, '') AS items_preview
             FROM procurements p
             INNER JOIN suppliers s ON s.id = p.supplier_id
-            INNER JOIN users u ON u.id = p.created_by";
+            INNER JOIN users u ON u.id = p.created_by
+            LEFT JOIN users rw ON rw.id = p.received_by
+            LEFT JOIN (
+              SELECT
+                procurement_id,
+                COUNT(*) AS items_count,
+                GROUP_CONCAT(
+                  CONCAT(product_name, ' x', quantity)
+                  ORDER BY id ASC
+                  SEPARATOR ', '
+                ) AS items_preview
+              FROM procurement_items
+              GROUP BY procurement_id
+            ) pi ON pi.procurement_id = p.id";
 
     $params = [];
     if (!empty($supplierId)) {
@@ -38,10 +97,11 @@ class ProcurementModel extends BaseModel {
     $stmt = $this->pdo->prepare(
             "SELECT p.id, p.supplier_id, s.name AS supplier_name, p.created_by,
               u.name AS created_by_name, p.order_date, p.expected_delivery,
-              p.status, p.received_by, p.total_amount, p.created_at
+              p.status, p.received_by, rw.name AS received_by_name, p.total_amount, p.created_at
        FROM procurements p
        INNER JOIN suppliers s ON s.id = p.supplier_id
        INNER JOIN users u ON u.id = p.created_by
+       LEFT JOIN users rw ON rw.id = p.received_by
        WHERE p.id = ?" . $supplierFilter
     );
 
@@ -104,6 +164,14 @@ class ProcurementModel extends BaseModel {
         "INSERT INTO procurement_items (procurement_id, product_id, product_name, quantity, unit_price, subtotal)
          VALUES (?, ?, ?, ?, ?, ?)"
       );
+      $upsertSupplierProduct = null;
+      if ($this->hasTable('supplier_products')) {
+        $upsertSupplierProduct = $this->pdo->prepare(
+          "INSERT INTO supplier_products (supplier_id, product_id, unit_price)
+           VALUES (?, ?, ?)
+           ON DUPLICATE KEY UPDATE unit_price = VALUES(unit_price), updated_at = CURRENT_TIMESTAMP"
+        );
+      }
 
       $total = 0.00;
       foreach ($dt->items as $item) {
@@ -128,6 +196,15 @@ class ProcurementModel extends BaseModel {
           $unitPrice,
           $subtotal
         ]);
+
+        $productId = isset($item->product_id) ? (int) $item->product_id : 0;
+        if ($productId > 0 && $upsertSupplierProduct !== null) {
+          $upsertSupplierProduct->execute([
+            (int) $dt->supplier_id,
+            $productId,
+            $unitPrice,
+          ]);
+        }
       }
 
       $updateTotal = $this->pdo->prepare("UPDATE procurements SET total_amount = ? WHERE id = ?");
@@ -169,10 +246,166 @@ class ProcurementModel extends BaseModel {
     return $this->getProcurement($id);
   }
 
+  public function updateProcurementStatusForSupplier($id, $supplierId, $dt) {
+    if (empty($dt->status)) {
+      throw new InvalidArgumentException("status is required");
+    }
+    $nextStatus = (string) $dt->status;
+    $this->statusAllowed($nextStatus, ['approved', 'cancelled'], 'procurement status');
+
+    $current = $this->getProcurement($id, $supplierId);
+    if (!$current) {
+      return null;
+    }
+    $currentStatus = (string) ($current['status'] ?? '');
+    if ($nextStatus === 'approved' && $currentStatus !== 'pending') {
+      throw new InvalidArgumentException("Supplier can only approve pending orders");
+    }
+    if ($nextStatus === 'cancelled' && in_array($currentStatus, ['delivered', 'cancelled'], true)) {
+      throw new InvalidArgumentException("This order can no longer be cancelled");
+    }
+
+    $stmt = $this->pdo->prepare(
+      "UPDATE procurements
+       SET status = ?
+       WHERE id = ? AND supplier_id = ?"
+    );
+    $stmt->execute([$nextStatus, (int) $id, (int) $supplierId]);
+
+    return $this->getProcurement($id, $supplierId);
+  }
+
+  public function receiveProcurementByWarehouse($id, $warehouseUserId) {
+    $current = $this->getProcurement($id);
+    if (!$current) {
+      return null;
+    }
+
+    $stmt = $this->pdo->prepare(
+      "UPDATE procurements
+       SET status = 'delivered', received_by = ?
+       WHERE id = ?"
+    );
+    $stmt->execute([(int) $warehouseUserId, (int) $id]);
+    return $this->getProcurement($id);
+  }
+
   public function deleteProcurement($id) {
     $stmt = $this->pdo->prepare("DELETE FROM procurements WHERE id = ?");
     $stmt->execute([(int) $id]);
     return ['deleted' => $stmt->rowCount() > 0];
+  }
+
+  public function listProcurementItems($procurementId, $supplierId = null) {
+    $procurement = $this->assertProcurementAccess($procurementId, $supplierId);
+    if (!$procurement) {
+      return null;
+    }
+
+    $stmt = $this->pdo->prepare(
+      "SELECT id, procurement_id, product_id, product_name, quantity, unit_price, subtotal
+       FROM procurement_items
+       WHERE procurement_id = ?
+       ORDER BY id ASC"
+    );
+    $stmt->execute([(int) $procurementId]);
+    return $stmt->fetchAll();
+  }
+
+  public function createProcurementItem($procurementId, $dt, $supplierId = null) {
+    $procurement = $this->assertProcurementAccess($procurementId, $supplierId);
+    if (!$procurement) {
+      return null;
+    }
+    if (empty($dt->product_name) || !isset($dt->quantity) || !isset($dt->unit_price)) {
+      throw new InvalidArgumentException("product_name, quantity and unit_price are required");
+    }
+
+    $quantity = (int) $dt->quantity;
+    $unitPrice = (float) $dt->unit_price;
+    if ($quantity <= 0 || $unitPrice < 0) {
+      throw new InvalidArgumentException("quantity must be > 0 and unit_price must be >= 0");
+    }
+
+    $subtotal = round($quantity * $unitPrice, 2);
+    $insert = $this->pdo->prepare(
+      "INSERT INTO procurement_items (procurement_id, product_id, product_name, quantity, unit_price, subtotal)
+       VALUES (?, ?, ?, ?, ?, ?)"
+    );
+    $insert->execute([
+      (int) $procurementId,
+      isset($dt->product_id) ? (int) $dt->product_id : null,
+      trim($dt->product_name),
+      $quantity,
+      $unitPrice,
+      $subtotal,
+    ]);
+
+    $this->recalculateProcurementTotal($procurementId);
+
+    $stmt = $this->pdo->prepare(
+      "SELECT id, procurement_id, product_id, product_name, quantity, unit_price, subtotal
+       FROM procurement_items
+       WHERE id = ? AND procurement_id = ?"
+    );
+    $stmt->execute([(int) $this->pdo->lastInsertId(), (int) $procurementId]);
+    return $stmt->fetch();
+  }
+
+  public function updateProcurementItem($procurementId, $itemId, $dt, $supplierId = null) {
+    $procurement = $this->assertProcurementAccess($procurementId, $supplierId);
+    if (!$procurement) {
+      return null;
+    }
+
+    $get = $this->pdo->prepare(
+      "SELECT id, procurement_id, product_id, product_name, quantity, unit_price, subtotal
+       FROM procurement_items
+       WHERE id = ? AND procurement_id = ?"
+    );
+    $get->execute([(int) $itemId, (int) $procurementId]);
+    $current = $get->fetch();
+    if (!$current) {
+      return null;
+    }
+
+    $productName = isset($dt->product_name) ? trim((string) $dt->product_name) : $current['product_name'];
+    $quantity = isset($dt->quantity) ? (int) $dt->quantity : (int) $current['quantity'];
+    $unitPrice = isset($dt->unit_price) ? (float) $dt->unit_price : (float) $current['unit_price'];
+    $productId = property_exists($dt, 'product_id') ? ($dt->product_id !== null ? (int) $dt->product_id : null) : $current['product_id'];
+
+    if ($productName === '' || $quantity <= 0 || $unitPrice < 0) {
+      throw new InvalidArgumentException("product_name must not be empty, quantity must be > 0 and unit_price must be >= 0");
+    }
+
+    $subtotal = round($quantity * $unitPrice, 2);
+
+    $update = $this->pdo->prepare(
+      "UPDATE procurement_items
+       SET product_id = ?, product_name = ?, quantity = ?, unit_price = ?, subtotal = ?
+       WHERE id = ? AND procurement_id = ?"
+    );
+    $update->execute([$productId, $productName, $quantity, $unitPrice, $subtotal, (int) $itemId, (int) $procurementId]);
+
+    $this->recalculateProcurementTotal($procurementId);
+
+    $get->execute([(int) $itemId, (int) $procurementId]);
+    return $get->fetch();
+  }
+
+  public function deleteProcurementItem($procurementId, $itemId, $supplierId = null) {
+    $procurement = $this->assertProcurementAccess($procurementId, $supplierId);
+    if (!$procurement) {
+      return null;
+    }
+
+    $delete = $this->pdo->prepare("DELETE FROM procurement_items WHERE id = ? AND procurement_id = ?");
+    $delete->execute([(int) $itemId, (int) $procurementId]);
+    $deleted = $delete->rowCount() > 0;
+    if ($deleted) {
+      $this->recalculateProcurementTotal($procurementId);
+    }
+    return ['deleted' => $deleted];
   }
 
   public function adminSuppliers() {

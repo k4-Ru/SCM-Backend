@@ -1,13 +1,57 @@
 <?php
 
 class UserModel extends BaseModel {
+  private $columnSupport = [];
+
+  private function hasColumn($columnName) {
+    if (array_key_exists($columnName, $this->columnSupport)) {
+      return $this->columnSupport[$columnName];
+    }
+
+    $stmt = $this->pdo->prepare(
+      "SELECT 1
+       FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'users'
+         AND COLUMN_NAME = ?
+       LIMIT 1"
+    );
+    $stmt->execute([$columnName]);
+    $this->columnSupport[$columnName] = (bool) $stmt->fetchColumn();
+    return $this->columnSupport[$columnName];
+  }
+
+  private function encryptedEmailSupported() {
+    return $this->hasColumn('email_enc') && $this->hasColumn('email_iv') && $this->hasColumn('email_tag');
+  }
+
+  private function userSelectFields() {
+    $base = 'id, name, email, role, supplier_id, is_active, last_login, created_at, updated_at';
+    if ($this->encryptedEmailSupported()) {
+      return $base . ', email_enc, email_iv, email_tag';
+    }
+    return $base . ', NULL AS email_enc, NULL AS email_iv, NULL AS email_tag';
+  }
+
+  private function decryptEmailForOutput($row) {
+    if (!$row) {
+      return $row;
+    }
+
+    if ($this->encryptedEmailSupported() && !empty($row['email_enc']) && !empty($row['email_iv']) && !empty($row['email_tag'])) {
+      $row['email'] = Crypto::decryptString($row['email_enc'], $row['email_iv'], $row['email_tag']);
+    }
+
+    unset($row['email_enc'], $row['email_iv'], $row['email_tag']);
+    return $row;
+  }
 
 
   public function listUsers($page = 1, $limit = 20) {
     list($limit, $offset) = $this->paginate($page, $limit);
 
     $stmt = $this->pdo->prepare(
-      "SELECT id, name, email, role, supplier_id, is_active, last_login, created_at, updated_at
+      "SELECT " . $this->userSelectFields() . "
        FROM users
        ORDER BY id DESC
        LIMIT ? OFFSET ?"
@@ -16,17 +60,22 @@ class UserModel extends BaseModel {
     $stmt->bindValue(2, $offset, PDO::PARAM_INT);
     $stmt->execute();
 
-    return $stmt->fetchAll();
+    $rows = $stmt->fetchAll();
+    foreach ($rows as &$row) {
+      $row = $this->decryptEmailForOutput($row);
+    }
+    unset($row);
+    return $rows;
   }
 
   public function getUser($id) {
     $stmt = $this->pdo->prepare(
-      "SELECT id, name, email, role, supplier_id, is_active, last_login, created_at, updated_at
+      "SELECT " . $this->userSelectFields() . "
        FROM users
        WHERE id = ?"
     );
     $stmt->execute([(int) $id]);
-    return $stmt->fetch();
+    return $this->decryptEmailForOutput($stmt->fetch());
   }
 
   public function getProfile($userId) {
@@ -50,25 +99,63 @@ class UserModel extends BaseModel {
       }
     }
 
+    $emailEncrypted = null;
+    if ($this->encryptedEmailSupported()) {
+      $emailEncrypted = Crypto::encryptString($email);
+    }
+
     if (!empty($dt->password)) {
-      $stmt = $this->pdo->prepare(
-        'UPDATE users
-         SET name = ?, email = ?, password_hash = ?, updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?'
-      );
-      $stmt->execute([
-        $name,
-        $email,
-        password_hash($dt->password, PASSWORD_DEFAULT),
-        (int) $userId
-      ]);
+      if ($this->encryptedEmailSupported()) {
+        $stmt = $this->pdo->prepare(
+          'UPDATE users
+           SET name = ?, email = ?, password_hash = ?, email_enc = ?, email_iv = ?, email_tag = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?'
+        );
+        $stmt->execute([
+          $name,
+          $email,
+          password_hash($dt->password, PASSWORD_DEFAULT),
+          $emailEncrypted['ciphertext'] ?? null,
+          $emailEncrypted['iv'] ?? null,
+          $emailEncrypted['tag'] ?? null,
+          (int) $userId
+        ]);
+      } else {
+        $stmt = $this->pdo->prepare(
+          'UPDATE users
+           SET name = ?, email = ?, password_hash = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?'
+        );
+        $stmt->execute([
+          $name,
+          $email,
+          password_hash($dt->password, PASSWORD_DEFAULT),
+          (int) $userId
+        ]);
+      }
     } else {
-      $stmt = $this->pdo->prepare(
-        'UPDATE users
-         SET name = ?, email = ?, updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?'
-      );
-      $stmt->execute([$name, $email, (int) $userId]);
+      if ($this->encryptedEmailSupported()) {
+        $stmt = $this->pdo->prepare(
+          'UPDATE users
+           SET name = ?, email = ?, email_enc = ?, email_iv = ?, email_tag = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?'
+        );
+        $stmt->execute([
+          $name,
+          $email,
+          $emailEncrypted['ciphertext'] ?? null,
+          $emailEncrypted['iv'] ?? null,
+          $emailEncrypted['tag'] ?? null,
+          (int) $userId
+        ]);
+      } else {
+        $stmt = $this->pdo->prepare(
+          'UPDATE users
+           SET name = ?, email = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?'
+        );
+        $stmt->execute([$name, $email, (int) $userId]);
+      }
     }
 
     return $this->getUser((int) $userId);
@@ -92,19 +179,44 @@ class UserModel extends BaseModel {
       throw new InvalidArgumentException('supplier_id is required for supplier role');
     }
 
-    $stmt = $this->pdo->prepare(
-      "INSERT INTO users (name, email, password_hash, role, supplier_id, is_active)
-       VALUES (?, ?, ?, ?, ?, ?)"
-    );
+    $email = strtolower(trim($dt->email));
+    $emailEncrypted = null;
+    if ($this->encryptedEmailSupported()) {
+      $emailEncrypted = Crypto::encryptString($email);
+    }
 
-    $stmt->execute([
-      trim($dt->name),
-      strtolower(trim($dt->email)),
-      password_hash($dt->password, PASSWORD_DEFAULT),
-      $role,
-      $supplierId,
-      $isActive
-    ]);
+    if ($this->encryptedEmailSupported()) {
+      $stmt = $this->pdo->prepare(
+        "INSERT INTO users (name, email, password_hash, role, supplier_id, is_active, email_enc, email_iv, email_tag)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      );
+
+      $stmt->execute([
+        trim($dt->name),
+        $email,
+        password_hash($dt->password, PASSWORD_DEFAULT),
+        $role,
+        $supplierId,
+        $isActive,
+        $emailEncrypted['ciphertext'] ?? null,
+        $emailEncrypted['iv'] ?? null,
+        $emailEncrypted['tag'] ?? null
+      ]);
+    } else {
+      $stmt = $this->pdo->prepare(
+        "INSERT INTO users (name, email, password_hash, role, supplier_id, is_active)
+         VALUES (?, ?, ?, ?, ?, ?)"
+      );
+
+      $stmt->execute([
+        trim($dt->name),
+        $email,
+        password_hash($dt->password, PASSWORD_DEFAULT),
+        $role,
+        $supplierId,
+        $isActive
+      ]);
+    }
 
     return $this->getUser($this->pdo->lastInsertId());
   }
@@ -131,37 +243,83 @@ class UserModel extends BaseModel {
       $supplierId = null;
     }
 
+    $emailEncrypted = null;
+    if ($this->encryptedEmailSupported()) {
+      $emailEncrypted = Crypto::encryptString($email);
+    }
+
     if (!empty($dt->password)) {
-      $stmt = $this->pdo->prepare(
-        "UPDATE users
-         SET name = ?, email = ?, password_hash = ?, role = ?, supplier_id = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?"
-      );
+      if ($this->encryptedEmailSupported()) {
+        $stmt = $this->pdo->prepare(
+          "UPDATE users
+           SET name = ?, email = ?, password_hash = ?, role = ?, supplier_id = ?, is_active = ?, email_enc = ?, email_iv = ?, email_tag = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?"
+        );
 
-      $stmt->execute([
-        trim($name),
-        $email,
-        password_hash($dt->password, PASSWORD_DEFAULT),
-        $role,
-        $supplierId,
-        $isActive,
-        (int) $id
-      ]);
+        $stmt->execute([
+          trim($name),
+          $email,
+          password_hash($dt->password, PASSWORD_DEFAULT),
+          $role,
+          $supplierId,
+          $isActive,
+          $emailEncrypted['ciphertext'] ?? null,
+          $emailEncrypted['iv'] ?? null,
+          $emailEncrypted['tag'] ?? null,
+          (int) $id
+        ]);
+      } else {
+        $stmt = $this->pdo->prepare(
+          "UPDATE users
+           SET name = ?, email = ?, password_hash = ?, role = ?, supplier_id = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?"
+        );
+
+        $stmt->execute([
+          trim($name),
+          $email,
+          password_hash($dt->password, PASSWORD_DEFAULT),
+          $role,
+          $supplierId,
+          $isActive,
+          (int) $id
+        ]);
+      }
     } else {
-      $stmt = $this->pdo->prepare(
-        "UPDATE users
-         SET name = ?, email = ?, role = ?, supplier_id = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?"
-      );
+      if ($this->encryptedEmailSupported()) {
+        $stmt = $this->pdo->prepare(
+          "UPDATE users
+           SET name = ?, email = ?, role = ?, supplier_id = ?, is_active = ?, email_enc = ?, email_iv = ?, email_tag = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?"
+        );
 
-      $stmt->execute([
-        trim($name),
-        $email,
-        $role,
-        $supplierId,
-        $isActive,
-        (int) $id
-      ]);
+        $stmt->execute([
+          trim($name),
+          $email,
+          $role,
+          $supplierId,
+          $isActive,
+          $emailEncrypted['ciphertext'] ?? null,
+          $emailEncrypted['iv'] ?? null,
+          $emailEncrypted['tag'] ?? null,
+          (int) $id
+        ]);
+      } else {
+        $stmt = $this->pdo->prepare(
+          "UPDATE users
+           SET name = ?, email = ?, role = ?, supplier_id = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?"
+        );
+
+        $stmt->execute([
+          trim($name),
+          $email,
+          $role,
+          $supplierId,
+          $isActive,
+          (int) $id
+        ]);
+      }
     }
 
     return $this->getUser($id);
@@ -171,5 +329,15 @@ class UserModel extends BaseModel {
     $stmt = $this->pdo->prepare("DELETE FROM users WHERE id = ?");
     $stmt->execute([(int) $id]);
     return ['deleted' => $stmt->rowCount() > 0];
+  }
+
+  public function listWarehouseUsers() {
+    $stmt = $this->pdo->query(
+      "SELECT id, name, email
+       FROM users
+       WHERE role = 'warehouse' AND is_active = 1
+       ORDER BY name ASC, id ASC"
+    );
+    return $stmt->fetchAll();
   }
 }

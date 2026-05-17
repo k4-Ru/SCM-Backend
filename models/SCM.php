@@ -10,8 +10,13 @@ class SCM {
     'createUser' => 'users',
     'updateUser' => 'users',
     'deleteUser' => 'users',
+    'listWarehouseUsers' => 'users',
     'listSuppliers' => 'suppliers',
     'getSupplier' => 'suppliers',
+    'listOwnedProducts' => 'suppliers',
+    'listSupplierProducts' => 'suppliers',
+    'listSupplierProductCatalog' => 'suppliers',
+    'replaceSupplierProducts' => 'suppliers',
     'createSupplier' => 'suppliers',
     'updateSupplier' => 'suppliers',
     'deleteSupplier' => 'suppliers',
@@ -19,7 +24,13 @@ class SCM {
     'getProcurement' => 'procurements',
     'createProcurement' => 'procurements',
     'updateProcurementStatus' => 'procurements',
+    'updateProcurementStatusForSupplier' => 'procurements',
+    'receiveProcurementByWarehouse' => 'procurements',
     'deleteProcurement' => 'procurements',
+    'listProcurementItems' => 'procurements',
+    'createProcurementItem' => 'procurements',
+    'updateProcurementItem' => 'procurements',
+    'deleteProcurementItem' => 'procurements',
     'adminSuppliers' => 'procurements',
     'adminOrders' => 'procurements',
     'reportOrderStatus' => 'procurements',
@@ -36,6 +47,7 @@ class SCM {
     'updateProduct' => 'products',
     'deleteProduct' => 'products',
     'listInventory' => 'inventory',
+    'listInventoryBySupplier' => 'inventory',
     'getInventory' => 'inventory',
     'upsertInventory' => 'inventory',
     'updateInventory' => 'inventory',
@@ -74,4 +86,3 @@ class SCM {
     return $this->models[$modelKey]->$name(...$arguments);
   }
 }
-

@@ -9,6 +9,8 @@ $allowedOrigins = [
   'http://localhost:5173',
   'http://127.0.0.1:5173'
 ];
+
+
 if (!empty($_ENV['FRONTEND_ORIGIN'])) {
   $allowedOrigins[] = trim($_ENV['FRONTEND_ORIGIN']);
 }
@@ -20,6 +22,8 @@ if ($origin !== '' && in_array($origin, $allowedOrigins, true)) {
 }
 header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
+
+
 
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
   http_response_code(204);
@@ -110,6 +114,91 @@ function resolveRouteParams() {
   return $path;
 }
 
+function buildSupplierApplicationPayloadFromRequest() {
+  $payload = new stdClass();
+  $payload->company_name = trim($_POST['company_name'] ?? '');
+  $payload->contact_person = trim($_POST['contact_person'] ?? '');
+  $payload->email = trim($_POST['email'] ?? '');
+  $payload->phone = trim($_POST['phone'] ?? '');
+  $payload->contact_number = trim($_POST['contact_number'] ?? '');
+  $payload->address = trim($_POST['address'] ?? '');
+  $payload->products_offered = trim($_POST['products_offered'] ?? '');
+  $payload->notes = trim($_POST['notes'] ?? '');
+  $password = (string) ($_POST['password'] ?? '');
+  if (strlen($password) < 8) {
+    throw new InvalidArgumentException('Password must be at least 8 characters');
+  }
+  $payload->password_hash = password_hash($password, PASSWORD_DEFAULT);
+  $payload->document_name = null;
+  $payload->document_path = null;
+  $payload->documents_json = null;
+
+  $documents = [];
+  $fileSource = null;
+  if (!empty($_FILES['documents'])) {
+    $fileSource = $_FILES['documents'];
+  } elseif (!empty($_FILES['document'])) {
+    $fileSource = $_FILES['document'];
+  }
+
+  if (!empty($fileSource)) {
+    $names = is_array($fileSource['name'] ?? null) ? $fileSource['name'] : [($fileSource['name'] ?? '')];
+    $tmpNames = is_array($fileSource['tmp_name'] ?? null) ? $fileSource['tmp_name'] : [($fileSource['tmp_name'] ?? '')];
+    $sizes = is_array($fileSource['size'] ?? null) ? $fileSource['size'] : [($fileSource['size'] ?? 0)];
+    $errors = is_array($fileSource['error'] ?? null) ? $fileSource['error'] : [($fileSource['error'] ?? UPLOAD_ERR_NO_FILE)];
+
+    $uploadDir = __DIR__ . '/uploads/supplier-docs';
+    if (!is_dir($uploadDir) && !mkdir($uploadDir, 0775, true) && !is_dir($uploadDir)) {
+      throw new RuntimeException('Unable to create upload directory');
+    }
+
+    $allowed = ['pdf', 'png', 'jpg', 'jpeg', 'doc', 'docx'];
+    $maxBytes = 5 * 1024 * 1024;
+
+    for ($i = 0; $i < count($names); $i += 1) {
+      if (($errors[$i] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) {
+        continue;
+      }
+      if (($errors[$i] ?? UPLOAD_ERR_OK) !== UPLOAD_ERR_OK) {
+        throw new RuntimeException('One of the documents failed to upload');
+      }
+
+      $size = (int) ($sizes[$i] ?? 0);
+      if ($size < 1 || $size > $maxBytes) {
+        throw new InvalidArgumentException('Each document must be between 1 byte and 5 MB');
+      }
+
+      $originalName = (string) ($names[$i] ?? '');
+      $ext = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
+      if (!in_array($ext, $allowed, true)) {
+        throw new InvalidArgumentException('Unsupported document type found in upload');
+      }
+
+      $safeBase = preg_replace('/[^a-zA-Z0-9_-]/', '', pathinfo($originalName, PATHINFO_FILENAME));
+      $safeBase = $safeBase ?: 'document';
+      $newName = sprintf('%s_%s.%s', date('YmdHis'), bin2hex(random_bytes(4)), $ext);
+      $targetPath = $uploadDir . '/' . $newName;
+
+      if (!move_uploaded_file((string) ($tmpNames[$i] ?? ''), $targetPath)) {
+        throw new RuntimeException('Unable to store one of the uploaded documents');
+      }
+
+      $documents[] = [
+        'name' => substr($safeBase, 0, 120) . '.' . $ext,
+        'path' => '/uploads/supplier-docs/' . $newName,
+      ];
+    }
+  }
+
+  if (!empty($documents)) {
+    $payload->document_name = $documents[0]['name'];
+    $payload->document_path = $documents[0]['path'];
+    $payload->documents_json = json_encode($documents);
+  }
+
+  return $payload;
+}
+
 
 
 
@@ -157,6 +246,12 @@ try {
     respond($auth->logout($dt), 200);
   }
 
+  // POST /api/public/supplier-applications
+  if ($method === 'POST' && $resource === 'public' && $subResource === 'supplier-applications') {
+    $applicationPayload = buildSupplierApplicationPayloadFromRequest();
+    respond($scm->createSupplierApplication($applicationPayload), 201);
+  }
+
 
 
 
@@ -198,8 +293,29 @@ try {
 
   
   // GET /api/me
-  if ($method === 'GET' && $resource === 'me') {
+  if ($method === 'GET' && $resource === 'me' && $subResource === '') {
     respond(['user' => $authPayload], 200);
+  }
+
+  // GET|PUT /api/me/supplier-products
+  if ($resource === 'me' && $subResource === 'supplier-products') {
+    requireSupplierUser($authPayload);
+    $supplierId = getSupplierIdFromToken($authPayload);
+    if ($supplierId < 1) {
+      respond(['error' => 'Supplier account is not linked to a supplier_id'], 403);
+    }
+
+    if ($method === 'GET') {
+      respond($scm->listSupplierProductCatalog($supplierId), 200);
+    }
+
+    if ($method === 'PUT') {
+      $items = [];
+      if (is_object($dt) && isset($dt->items) && is_array($dt->items)) {
+        $items = $dt->items;
+      }
+      respond($scm->replaceSupplierProducts($supplierId, $items), 200);
+    }
   }
 
 
@@ -223,6 +339,15 @@ try {
       }
       respond($profile, 200);
     }
+  }
+
+  // GET /api/warehouses
+  if ($method === 'GET' && $resource === 'warehouses') {
+    $role = $authPayload['role'] ?? '';
+    if ($role === 'viewer') {
+      respond(['error' => 'Forbidden for this role'], 403);
+    }
+    respond($scm->listWarehouseUsers(), 200);
   }
 
   // GET /api/admin/suppliers
@@ -309,27 +434,13 @@ try {
         if ($role === 'viewer') {
           respond(['error' => 'Forbidden. Viewers cannot access suppliers'], 403);
         }
-        if ($role === 'supplier') {
-          $supplierId = getSupplierIdFromToken($authPayload);
-          if ($supplierId < 1) {
-            respond(['error' => 'Supplier account is not linked to a supplier_id'], 403);
-          }
+        $resourceIndex = (($param[0] ?? '') === 'api') ? 1 : 0;
+        $supplierId = (int) ($param[$resourceIndex + 1] ?? 0);
+        $supplierNestedResource = $param[$resourceIndex + 2] ?? '';
 
-          $row = $scm->getSupplier($supplierId);
-          if (!$row) {
-            respond(['error' => 'Supplier not found'], 404);
-          }
-
-          // Supplier role can only see own supplier profile.
-          if (!empty($id) && $id !== $supplierId) {
-            respond(['error' => 'Forbidden. You can only access your own supplier record'], 403);
-          }
-
-          if (!empty($id)) {
-            respond($row, 200);
-          }
-
-          respond([$row], 200);
+        // GET /api/suppliers/{id}/products
+        if ($supplierId > 0 && $supplierNestedResource === 'products') {
+          respond($scm->listSupplierProducts($supplierId), 200);
         }
 
         if (!empty($id)) {
@@ -384,6 +495,57 @@ try {
       if ($role === 'viewer') {
         respond(['error' => 'Forbidden. Viewers cannot access procurements'], 403);
       }
+      $resourceIndex = (($param[0] ?? '') === 'api') ? 1 : 0;
+      $procurementId = (int) ($param[$resourceIndex + 1] ?? 0);
+      $nestedResource = $param[$resourceIndex + 2] ?? '';
+      $nestedId = (int) ($param[$resourceIndex + 3] ?? 0);
+
+      // GET|POST|PATCH|DELETE /api/procurements/{id}/items[/itemId]
+      if ($procurementId > 0 && $nestedResource === 'items') {
+        $supplierId = null;
+        if ($role === 'supplier') {
+          $supplierId = getSupplierIdFromToken($authPayload);
+          if ($supplierId < 1) {
+            respond(['error' => 'Supplier account is not linked to a supplier_id'], 403);
+          }
+        }
+
+        if ($method === 'GET') {
+          $items = $scm->listProcurementItems($procurementId, $supplierId);
+          if ($items === null) {
+            respond(['error' => 'Procurement not found'], 404);
+          }
+          respond($items, 200);
+        }
+
+        if ($method === 'POST') {
+          requireInternalUser($authPayload);
+          $item = $scm->createProcurementItem($procurementId, $dt, $supplierId);
+          if ($item === null) {
+            respond(['error' => 'Procurement not found'], 404);
+          }
+          respond($item, 201);
+        }
+
+        if ($method === 'PATCH' && $nestedId > 0) {
+          requireInternalUser($authPayload);
+          $item = $scm->updateProcurementItem($procurementId, $nestedId, $dt, $supplierId);
+          if ($item === null) {
+            respond(['error' => 'Procurement item not found'], 404);
+          }
+          respond($item, 200);
+        }
+
+        if ($method === 'DELETE' && $nestedId > 0) {
+          requireInternalUser($authPayload);
+          $deleted = $scm->deleteProcurementItem($procurementId, $nestedId, $supplierId);
+          if ($deleted === null) {
+            respond(['error' => 'Procurement not found'], 404);
+          }
+          respond($deleted, 200);
+        }
+      }
+
       // GET /api/procurements and GET /api/procurements/{id}
       if ($method === 'GET') {
         $supplierId = null;
@@ -407,14 +569,30 @@ try {
 
       // POST /api/procurements
       if ($method === 'POST') {
-        requireInternalUser($authPayload);
+        if ($role !== 'procurement') {
+          respond(['error' => 'Forbidden. Procurement access required'], 403);
+        }
         respond($scm->createProcurement($dt), 201);
       }
 
       // PATCH /api/procurements/{id}
       if ($method === 'PATCH' && !empty($id)) {
-        requireInternalUser($authPayload);
-        $row = $scm->updateProcurementStatus($id, $dt);
+        if ($role === 'supplier') {
+          $supplierId = getSupplierIdFromToken($authPayload);
+          if ($supplierId < 1) {
+            respond(['error' => 'Supplier account is not linked to a supplier_id'], 403);
+          }
+          $row = $scm->updateProcurementStatusForSupplier($id, $supplierId, $dt);
+        } elseif ($role === 'warehouse') {
+          $nextStatus = (string) ($dt->status ?? '');
+          if ($nextStatus !== 'delivered') {
+            respond(['error' => 'Warehouse can only mark orders as delivered'], 403);
+          }
+          $warehouseUserId = (int) ($authPayload['sub'] ?? 0);
+          $row = $scm->receiveProcurementByWarehouse($id, $warehouseUserId);
+        } else {
+          respond(['error' => 'Forbidden. Only supplier or warehouse can update order status'], 403);
+        }
         if (!$row) {
           respond(['error' => 'Procurement not found'], 404);
         }
@@ -423,8 +601,7 @@ try {
 
       // DELETE /api/procurements/{id}
       if ($method === 'DELETE' && !empty($id)) {
-        requireInternalUser($authPayload);
-        respond($scm->deleteProcurement($id), 200);
+        respond(['error' => 'Forbidden'], 403);
       }
       break;
 
@@ -467,8 +644,14 @@ try {
 
       // POST /api/shipments
       if ($method === 'POST') {
-        requireInternalUser($authPayload);
-        respond($scm->createShipment($dt), 201);
+        if ($role === 'supplier') {
+          $supplierId = getSupplierIdFromToken($authPayload);
+          if ($supplierId < 1) {
+            respond(['error' => 'Supplier account is not linked to a supplier_id'], 403);
+          }
+          respond($scm->createShipment($dt, $supplierId), 201);
+        }
+        respond(['error' => 'Forbidden. Supplier access required'], 403);
       }
 
       // PATCH /api/shipments/{id}
@@ -480,8 +663,11 @@ try {
           }
           $row = $scm->updateShipmentStatusForSupplier($id, $supplierId, $dt);
         } else {
-          requireInternalUser($authPayload);
-          $row = $scm->updateShipment($id, $dt);
+          if ($role !== 'warehouse') {
+            respond(['error' => 'Forbidden. Warehouse access required'], 403);
+          }
+          $warehouseUserId = (int) ($authPayload['sub'] ?? 0);
+          $row = $scm->updateShipment($id, $dt, $warehouseUserId);
         }
         if (!$row) {
           respond(['error' => 'Shipment not found'], 404);
@@ -491,8 +677,7 @@ try {
 
       // DELETE /api/shipments/{id}
       if ($method === 'DELETE' && !empty($id)) {
-        requireInternalUser($authPayload);
-        respond($scm->deleteShipment($id), 200);
+        respond(['error' => 'Forbidden'], 403);
       }
       break;
 
@@ -516,6 +701,14 @@ try {
     case 'products':
       // GET /api/products and GET /api/products/{id}
       if ($method === 'GET') {
+        $role = $authPayload['role'] ?? '';
+        if ($role === 'supplier' && empty($id)) {
+          $supplierId = getSupplierIdFromToken($authPayload);
+          if ($supplierId < 1) {
+            respond(['error' => 'Supplier account is not linked to a supplier_id'], 403);
+          }
+          respond($scm->listOwnedProducts($supplierId), 200);
+        }
         if (!empty($id)) {
           $row = $scm->getProduct($id);
           if (!$row) {
@@ -566,7 +759,17 @@ try {
     case 'inventory':
       // GET /api/inventory and GET /api/inventory/{id}
       if ($method === 'GET') {
-        requireInternalEditor($authPayload);
+        $role = $authPayload['role'] ?? '';
+        if ($role === 'viewer') {
+          respond(['error' => 'Forbidden for this role'], 403);
+        }
+        if ($role === 'supplier' && empty($id)) {
+          $supplierId = getSupplierIdFromToken($authPayload);
+          if ($supplierId < 1) {
+            respond(['error' => 'Supplier account is not linked to a supplier_id'], 403);
+          }
+          respond($scm->listInventoryBySupplier($supplierId), 200);
+        }
         if (!empty($id)) {
           $row = $scm->getInventory($id);
           if (!$row) {
@@ -579,13 +782,19 @@ try {
 
       // POST /api/inventory (upsert by product_id)
       if ($method === 'POST') {
-        requireInternalEditor($authPayload);
+        $role = $authPayload['role'] ?? '';
+        if ($role !== 'warehouse') {
+          respond(['error' => 'Forbidden. Warehouse access required'], 403);
+        }
         respond($scm->upsertInventory($dt), 201);
       }
 
       // PATCH /api/inventory/{id}
       if ($method === 'PATCH' && !empty($id)) {
-        requireInternalEditor($authPayload);
+        $role = $authPayload['role'] ?? '';
+        if ($role !== 'warehouse') {
+          respond(['error' => 'Forbidden. Warehouse access required'], 403);
+        }
         $row = $scm->updateInventory($id, $dt);
         if (!$row) {
           respond(['error' => 'Inventory row not found'], 404);

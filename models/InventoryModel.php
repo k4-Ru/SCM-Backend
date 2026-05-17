@@ -11,6 +11,19 @@ class InventoryModel extends BaseModel {
     return $stmt->fetchAll();
   }
 
+  public function listInventoryBySupplier($supplierId) {
+    $stmt = $this->pdo->prepare(
+      "SELECT i.id, i.product_id, p.name AS product_name, i.stock_quantity, i.location, i.last_updated
+       FROM inventory i
+       INNER JOIN products p ON p.id = i.product_id
+       INNER JOIN supplier_products sp ON sp.product_id = i.product_id
+       WHERE sp.supplier_id = ?
+       ORDER BY i.id DESC"
+    );
+    $stmt->execute([(int) $supplierId]);
+    return $stmt->fetchAll();
+  }
+
   public function getInventory($id) {
     $stmt = $this->pdo->prepare(
       "SELECT i.id, i.product_id, p.name AS product_name, i.stock_quantity, i.location, i.last_updated
